@@ -15,36 +15,42 @@
 import pprint
 import sys
 import traceback
+import requests
+import json
 
-# Import the email modules we'll need
-from email import header
-from email.mime import text
-import smtplib
 import znc
 
+# Slack connection information
+SLACK_CHANNEL = '@dims'
+SLACK_USER_NAME = 'zncbot'
+SLACK_EMOJI = ':ghost:'
+SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/XYZ/123'
 
 pp = pprint.PrettyPrinter()
 
 
 def _is_self(*args):
     """Utility method to make sure only calling on right modules."""
-    if len(args) > 1 and type(args[0]) == mailonmsg:
+    if len(args) > 1 and type(args[0]) == slackonmsg:
         return args[0]
     return None
 
 
 def trace(fn):
     """Useful decorator for debugging."""
+
     def wrapper(*args, **kwargs):
         s = _is_self(*args)
         if s:
             s.PutModule("TRACE: %s" % (fn.__name__))
         return fn(*args, **kwargs)
+
     return wrapper
 
 
 def catchfail(fn):
     """Catch exceptions and get them onto the module channel."""
+
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
@@ -58,23 +64,24 @@ def catchfail(fn):
                                                    exc_traceback)
                 for line in lines:
                     s.PutModule(line)
+
     return wrapper
 
 
-class mailonmsgtimer(znc.Timer):
+class slackonmsgtimer(znc.Timer):
     nick = None
     chan = None
     mod = None
 
     def RunJob(self):
-        if self.mod.send_email(self.nick, self.chan):
+        if self.mod.send_notification(self.nick, self.chan):
             self.mod.PutModule("clearing buffer")
             self.mod.clear_buffer(self.nick, self.chan)
-            self.mod.PutModule("Email sent")
+            self.mod.PutModule("Notification sent")
 
 
-class mailonmsg(znc.Module):
-    """Module to email messages to users when they are away.
+class slackonmsg(znc.Module):
+    """Module to send slack notifications to users when they are away.
 
     After moving from maiu to znc, the one feature I missed was the
     email when away. This tries to replicate this feature through emailing
@@ -82,7 +89,7 @@ class mailonmsg(znc.Module):
     """
     # module_types = [znc.CModInfo.UserModule]
 
-    description = 'send email on message'
+    description = 'send slack notification on message'
 
     keywords = []
     pending = {}
@@ -90,7 +97,6 @@ class mailonmsg(znc.Module):
     def _should_send(self, nick, chan=None, msg=""):
         """Conditions on which we should send a notification."""
         if not self.GetNetwork().IsIRCAway():
-            self.PutModule("Not sending because not away")
             return False
         else:
             return True
@@ -131,7 +137,7 @@ class mailonmsg(znc.Module):
 
         if self.buffer(nick, chan) is None:
             self.create_buffer(nick, chan)
-            timer = self.CreateTimer(mailonmsgtimer, interval=60, cycles=1)
+            timer = self.CreateTimer(slackonmsgtimer, interval=5, cycles=1)
             timer.mod = self
             timer.nick = nick
             timer.chan = chan
@@ -139,26 +145,25 @@ class mailonmsg(znc.Module):
         self.add_to_buffer(nick, chan, msg)
 
     @catchfail
-    def send_email(self, nick, chan):
+    def send_notification(self, nick, chan):
         msg = self.buffer(nick, chan)
         if not msg:
             self.PutModule("Something is wrong, no message")
             return False
 
-        email = text.MIMEText(msg.encode('utf-8'), 'plain', 'utf-8')
-
         if chan:
-            email['Subject'] = header.Header(
-                'IRC message on %s from %s' % (chan, nick), 'utf-8')
+            text = 'IRC message on %s from %s : %s' % (chan, nick, msg)
         else:
-            email['Subject'] = header.Header(
-                'IRC priv message from %s' % nick, 'utf-8')
+            text = 'IRC priv message from %s : %s' % (nick, msg)
 
-        email['From'] = self.nv['from']
-        email['To'] = self.nv['to']
-        s = smtplib.SMTP('localhost')
-        s.sendmail(email['From'], [email['To']], email.as_string())
-        s.quit()
+        data = {
+            'channel': SLACK_CHANNEL,
+            'username': SLACK_USER_NAME,
+            'icon_emoji': SLACK_EMOJI,
+            'text': text
+        }
+
+        requests.post(SLACK_WEBHOOK_URL, data={'payload': json.dumps(data)})
         return True
 
     @catchfail
@@ -170,36 +175,16 @@ class mailonmsg(znc.Module):
     def OnLoad(self, args, msg):
         self.keywords = [
             self.GetUser().GetNick()
-            ]
+        ]
 
-        # TODO(sdague): real parser here
-        arglist = args.split()
-        for arg in arglist:
-            k, v = arg.split("=")
-            if k in ('to', 'from'):
-                self.nv[k] = v
-
-        fail = False
-        if not 'from' in self.nv:
-            self.PutModule("No from specified, please pass from=emailaddr "
-                           "to the loadmod call")
-            fail = True
-        if not 'to' in self.nv:
-            self.PutModule("No to specified, please pass to=emailaddr "
-                           "to the loadmod call")
-            fail = True
-
-        if fail:
-            return False
-        else:
-            self.PutModule("mailonmsg loaded successfully")
-            self.PutModule("mails will be sent to '%s', from '%s'" %
-                           (self.nv['to'], self.nv['from']))
-            return znc.CONTINUE
+        self.PutModule("slackonmsg loaded successfully")
+        self.PutModule("notifications will be sent to channel '%s', "
+                       "from user '%s'" %
+                       (SLACK_CHANNEL, SLACK_USER_NAME))
+        return znc.CONTINUE
 
     @catchfail
     def OnPrivMsg(self, nick, msg):
-        # self.PutModule("PRIVMSG received from %s" % nick.GetNick())
         self.send(nick=nick.GetNick(), msg=msg.s)
         return znc.CONTINUE
 
@@ -212,4 +197,4 @@ class mailonmsg(znc.Module):
 
     @catchfail
     def GetWebMenuTitle(self):
-        return "E-Mail on messages when away"
+        return "Post to Slack on messages when away"
